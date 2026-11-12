@@ -178,21 +178,26 @@ def get_secret(name, default=None):
         return os.environ.get(name, default)
 
 
-def extract_with_claude(file):
-    import anthropic
-    key = get_secret("ANTHROPIC_API_KEY")
+def extract_with_gemini(file):
+    import requests
+    key = get_secret("GEMINI_API_KEY")
     if not key:
-        raise RuntimeError("مفيش ANTHROPIC_API_KEY في الـ Secrets")
-    client = anthropic.Anthropic(api_key=key)
-    data = base64.standard_b64encode(file.getvalue()).decode()
-    if file.type == "application/pdf":
-        block = {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
-    else:
-        block = {"type": "image", "source": {"type": "base64", "media_type": file.type, "data": data}}
-    resp = client.messages.create(
-        model=get_secret("CLAUDE_MODEL", "claude-sonnet-5-5"), max_tokens=1000,
-        messages=[{"role": "user", "content": [block, {"type": "text", "text": EXTRACT_PROMPT}]}])
-    text = "".join(b.text for b in resp.content if b.type == "text")
+        raise RuntimeError("مفيش GEMINI_API_KEY في الـ Secrets")
+    model = get_secret("GEMINI_MODEL", "gemini-3.5-flash")
+    mime = "application/pdf" if file.name.lower().endswith(".pdf") else file.type
+    body = {
+        "contents": [{"parts": [
+            {"inline_data": {"mime_type": mime, "data": base64.standard_b64encode(file.getvalue()).decode()}},
+            {"text": EXTRACT_PROMPT}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
+    }
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+        json=body, timeout=90)
+    if r.status_code != 200:
+        raise RuntimeError(f"Gemini API error {r.status_code}: {r.text[:300]}")
+    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
     return json.loads(text[text.index("{"): text.rindex("}") + 1])
 
 
@@ -238,7 +243,7 @@ with st.expander("📎 ارفع صورة السؤال أو ملف (اختيار�
                         st.success("اتقرت الدالة من الملف")
                 else:
                     with st.spinner("بقرا السؤال..."):
-                        st.success(apply_extracted(extract_with_claude(up)))
+                        st.success(apply_extracted(extract_with_gemini(up)))
             except Exception as e:
                 st.error(f"معرفتش أقرا الملف: {e}")
 
