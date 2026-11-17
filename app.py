@@ -183,7 +183,8 @@ def extract_with_gemini(file):
     key = get_secret("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("مفيش GEMINI_API_KEY في الـ Secrets")
-    model = get_secret("GEMINI_MODEL", "gemini-3.5-flash")
+    primary = get_secret("GEMINI_MODEL", "gemini-3.5-flash")
+    models = [primary] + [m for m in ("gemini-2.5-flash", "gemini-flash-latest") if m != primary]
     mime = "application/pdf" if file.name.lower().endswith(".pdf") else file.type
     body = {
         "contents": [{"parts": [
@@ -191,14 +192,22 @@ def extract_with_gemini(file):
             {"text": EXTRACT_PROMPT}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
     }
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-        json=body, timeout=90)
-    if r.status_code != 200:
-        raise RuntimeError(f"Gemini API error {r.status_code}: {r.text[:300]}")
-    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(text[text.index("{"): text.rindex("}") + 1])
+    last_err = "unknown error"
+    for model in models:
+        for attempt in range(3):
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                json=body, timeout=90)
+            if r.status_code == 200:
+                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text[text.index("{"): text.rindex("}") + 1])
+            last_err = f"{model}: {r.status_code} {r.text[:200]}"
+            if r.status_code in (429, 500, 503):   # busy: wait and retry, then try next model
+                time.sleep(2 * (attempt + 1))
+                continue
+            break                                  # 400/403/404...: try next model
+    raise RuntimeError(f"Gemini مش متاح دلوقتي، جرّب بعد شوية. آخر خطأ: {last_err}")
 
 
 def apply_extracted(d):
