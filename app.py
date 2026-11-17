@@ -178,6 +178,17 @@ def get_secret(name, default=None):
         return os.environ.get(name, default)
 
 
+def shrink_image(raw, max_side=1600):
+    """Downscale big photos so the upload is small and Gemini answers faster."""
+    from io import BytesIO
+    from PIL import Image
+    img = Image.open(BytesIO(raw))
+    img.thumbnail((max_side, max_side))
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=88)
+    return buf.getvalue(), "image/jpeg"
+
+
 def extract_with_gemini(file):
     import requests
     key = get_secret("GEMINI_API_KEY")
@@ -185,28 +196,44 @@ def extract_with_gemini(file):
         raise RuntimeError("مفيش GEMINI_API_KEY في الـ Secrets")
     primary = get_secret("GEMINI_MODEL", "gemini-3.5-flash")
     models = [primary] + [m for m in ("gemini-2.5-flash", "gemini-flash-latest") if m != primary]
-    mime = "application/pdf" if file.name.lower().endswith(".pdf") else file.type
+    raw = file.getvalue()
+    if file.name.lower().endswith(".pdf"):
+        mime = "application/pdf"
+    else:
+        try:
+            raw, mime = shrink_image(raw)
+        except Exception:
+            mime = file.type
     body = {
         "contents": [{"parts": [
-            {"inline_data": {"mime_type": mime, "data": base64.standard_b64encode(file.getvalue()).decode()}},
+            {"inline_data": {"mime_type": mime, "data": base64.standard_b64encode(raw).decode()}},
             {"text": EXTRACT_PROMPT}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0},
     }
     last_err = "unknown error"
     for model in models:
-        for attempt in range(3):
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                json=body, timeout=90)
+        for attempt in range(2):
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                    json=body, timeout=40)
+            except requests.exceptions.RequestException as e:   # timeout / network
+                last_err = f"{model}: {type(e).__name__}"
+                time.sleep(2)
+                continue
             if r.status_code == 200:
-                text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text[text.index("{"): text.rindex("}") + 1])
+                try:
+                    text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    return json.loads(text[text.index("{"): text.rindex("}") + 1])
+                except Exception:
+                    last_err = f"{model}: رد غير مفهوم"
+                    break
             last_err = f"{model}: {r.status_code} {r.text[:200]}"
-            if r.status_code in (429, 500, 503):   # busy: wait and retry, then try next model
+            if r.status_code in (429, 500, 503):
                 time.sleep(2 * (attempt + 1))
                 continue
-            break                                  # 400/403/404...: try next model
+            break
     raise RuntimeError(f"Gemini مش متاح دلوقتي، جرّب بعد شوية. آخر خطأ: {last_err}")
 
 
